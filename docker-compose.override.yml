@@ -1,0 +1,30 @@
+# Development overrides for docker-compose
+# This file is automatically loaded with docker-compose.yml
+
+services:
+  coolify:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      # Mount source code for live development
+      - .:/var/www/html
+      - /var/www/html/vendor
+      - /var/www/html/node_modules
+    environment:
+      APP_DEBUG: "true"
+      APP_ENV: local
+
+  # Enable hot module replacement for Vite
+  coolify-vite:
+    image: oven/bun:1
+    container_name: coolify-vite
+    working_dir: /app
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: bun run dev --host
+    ports:
+      - "5173:5173"
+    networks:
+      - coolify-network

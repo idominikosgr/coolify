@@ -38,7 +38,19 @@ return [
     |
     */
 
-    'layout' => 'components.layout',
+    'layout' => 'layouts.app',
+
+    /*
+    |---------------------------------------------------------------------------
+    | Lazy Loading Placeholder
+    |---------------------------------------------------------------------------
+    | Livewire allows you to lazy load components that would otherwise slow down
+    | the initial page load. Every component can have a custom placeholder or
+    | you can define the default placeholder view for all components below.
+    |
+    */
+
+    'lazy_placeholder' => null,
 
     /*
     |---------------------------------------------------------------------------
@@ -53,9 +65,7 @@ return [
 
     'temporary_file_upload' => [
         'disk' => null,        // Example: 'local', 's3'              | Default: 'default'
-        'rules' => [           // Example: ['file', 'mimes:png,jpg']  | Default: ['required', 'file', 'max:12288'] (12MB)
-            'file', 'max:256000',
-        ],
+        'rules' => null,       // Example: ['file', 'mimes:png,jpg']  | Default: ['required', 'file', 'max:12288'] (12MB)
         'directory' => null,   // Example: 'tmp'                      | Default: 'livewire-tmp'
         'middleware' => null,  // Example: 'throttle:5,1'             | Default: 'throttle:60,1'
         'preview_mimes' => [   // Supported file types for temporary pre-signed file URLs...
@@ -64,6 +74,7 @@ return [
             'jpg', 'jpeg', 'mpga', 'webp', 'wma',
         ],
         'max_upload_time' => 5, // Max duration (in minutes) before an upload is invalidated...
+        'cleanup' => true, // Should cleanup temporary uploads older than 24 hrs...
     ],
 
     /*
@@ -110,7 +121,7 @@ return [
     | Navigate (SPA mode)
     |---------------------------------------------------------------------------
     |
-    | By adding `` to links in your Livewire application, Livewire
+    | By adding `wire:navigate` to links in your Livewire application, Livewire
     | will prevent the default link handling and instead request those pages
     | via AJAX, creating an SPA-like effect. Configure this behavior here.
     |
@@ -118,7 +129,7 @@ return [
 
     'navigate' => [
         'show_progress_bar' => true,
-        'progress_bar_color' => '#ffff00',
+        'progress_bar_color' => '#2299dd',
     ],
 
     /*
@@ -146,5 +157,4 @@ return [
     */
 
     'pagination_theme' => 'tailwind',
-    'lazy_placeholder' => 'components.page-loading',
 ];
