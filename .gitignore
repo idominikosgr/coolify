@@ -8,6 +8,7 @@
 .env
 .env.backup
 .env.secrets
+.env.production
 .phpunit.result.cache
 Homestead.json
 Homestead.yaml
@@ -38,3 +39,4 @@ docker/coolify-realtime/node_modules
 .DS_Store
 CHANGELOG.md
 /.workspaces
+.env.production

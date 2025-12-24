@@ -1,0 +1,256 @@
+name: Deploy to Azure
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+      force_update:
+        description: 'Force update even if no changes'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP || 'coolify-rg' }}
+  AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME || 'coolify-vm' }}
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy-app: ${{ steps.changes.outputs.app }}
+      deploy-config: ${{ steps.changes.outputs.config }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Detect changes
+      uses: dorny/paths-filter@v2
+      id: changes
+      with:
+        filters: |
+          app:
+            - 'app/**'
+            - 'bootstrap/**'
+            - 'config/**'
+            - 'database/**'
+            - 'resources/**'
+            - 'routes/**'
+            - 'composer.json'
+            - 'composer.lock'
+            - 'package.json'
+            - 'package-lock.json'
+            - 'Dockerfile'
+            - 'Dockerfile.dev'
+          config:
+            - 'docker-compose.yml'
+            - 'docker-compose.prod.yml'
+            - '.env*'
+            - 'scripts/**'
+
+    - name: Get version
+      id: version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+        else
+          VERSION=$(date +%Y%m%d-%H%M%S)
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  deploy-azure:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: needs.detect-changes.outputs.deploy-app == 'true' || needs.detect-changes.outputs.deploy-config == 'true' || github.event.inputs.force_update == 'true'
+    environment: ${{ github.event.inputs.environment || 'production' }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Azure CLI
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Validate Azure resources
+      run: |
+        echo "Validating Azure resources..."
+        az group show --name ${{ env.AZURE_RESOURCE_GROUP }} || echo "Resource group not found"
+        az vm show --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --name ${{ env.AZURE_VM_NAME }} || echo "VM not found"
+
+    - name: Get VM details
+      id: vm-details
+      run: |
+        VM_INFO=$(az vm show \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name ${{ env.AZURE_VM_NAME }} \
+          --query "{publicIp:publicIpAddress, adminUsername:osProfile.adminUsername}" \
+          --output json)
+        
+        echo "public-ip=$(echo $VM_INFO | jq -r '.publicIp')" >> $GITHUB_OUTPUT
+        echo "admin-username=$(echo $VM_INFO | jq -r '.adminUsername')" >> $GITHUB_OUTPUT
+
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.7.0
+      with:
+        ssh-private-key: ${{ secrets.AZURE_SSH_PRIVATE_KEY }}
+
+    - name: Add Azure VM to known hosts
+      run: |
+        ssh-keyscan -H ${{ steps.vm-details.outputs.public-ip }} >> ~/.ssh/known_hosts
+
+    - name: Deploy application
+      if: needs.detect-changes.outputs.deploy-app == 'true'
+      run: |
+        echo "Deploying application updates..."
+        
+        # SSH to Azure VM and update
+        ssh ${{ steps.vm-details.outputs.admin-username }}@${{ steps.vm-details.outputs.public-ip }} bash << 'EOF'
+        set -e
+        
+        cd ~/coolify
+        
+        # Create backup
+        BACKUP_NAME="auto-backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p backups/$BACKUP_NAME
+        
+        echo "Creating backup: $BACKUP_NAME"
+        docker exec coolify-db pg_dump -U coolify coolify | gzip > backups/$BACKUP_NAME/database.sql.gz
+        cp docker-compose.yml backups/$BACKUP_NAME/
+        
+        # Pull latest images
+        echo "Pulling latest images..."
+        docker compose pull
+        
+        # Update application
+        echo "Updating application..."
+        docker compose up -d
+        
+        # Wait for services
+        sleep 15
+        
+        # Run migrations
+        echo "Running migrations..."
+        docker exec coolify-app php /var/www/html/artisan migrate --force
+        
+        # Clear caches
+        echo "Clearing caches..."
+        docker exec coolify-app php /var/www/html/artisan cache:clear
+        docker exec coolify-app php /var/www/html/artisan config:clear
+        docker exec coolify-app php /var/www/html/artisan route:clear
+        
+        echo "Application updated successfully"
+        EOF
+
+    - name: Update configuration
+      if: needs.detect-changes.outputs.deploy-config == 'true'
+      run: |
+        echo "Updating configuration..."
+        
+        # Copy new configuration files
+        scp docker-compose.prod.yml ${{ steps.vm-details.outputs.admin-username }}@${{ steps.vm-details.outputs.public-ip }}:~/coolify/docker-compose.yml.new
+        
+        # Update configuration on remote
+        ssh ${{ steps.vm-details.outputs.admin-username }}@${{ steps.vm-details.outputs.public-ip }} bash << 'EOF'
+        set -e
+        
+        cd ~/coolify
+        
+        # Backup current configuration
+        cp docker-compose.yml docker-compose.yml.backup
+        
+        # Apply new configuration
+        mv docker-compose.yml.new docker-compose.yml
+        
+        # Restart services with new configuration
+        docker compose down
+        docker compose up -d
+        
+        # Wait for services
+        sleep 20
+        
+        # Verify services
+        docker compose ps
+        
+        echo "Configuration updated successfully"
+        EOF
+
+    - name: Health check
+      run: |
+        echo "Performing health check..."
+        
+        # Wait a bit for services to stabilize
+        sleep 30
+        
+        # Check application health
+        HTTP_STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://${{ steps.vm-details.outputs.public-ip }})
+        if [[ $HTTP_STATUS =~ ^(200|302)$ ]]; then
+          echo "✅ Application is healthy (HTTP $HTTP_STATUS)"
+        else
+          echo "❌ Application health check failed (HTTP $HTTP_STATUS)"
+          exit 1
+        fi
+        
+        # Check database health
+        ssh ${{ steps.vm-details.outputs.admin-username }}@${{ steps.vm-details.outputs.public-ip }} "docker exec coolify-db pg_isready -U coolify" || {
+          echo "❌ Database health check failed"
+          exit 1
+        }
+        
+        # Check Redis health
+        ssh ${{ steps.vm-details.outputs.admin-username }}@${{ steps.vm-details.outputs.public-ip }} "docker exec coolify-redis redis-cli ping" || {
+          echo "❌ Redis health check failed"
+          exit 1
+        }
+        
+        echo "✅ All health checks passed"
+
+    - name: Cleanup old Docker images
+      run: |
+        echo "Cleaning up old Docker images..."
+        ssh ${{ steps.vm-details.outputs.admin-username }}@${{ steps.vm-details.outputs.public-ip }} "docker image prune -f"
+
+    - name: Notify deployment success
+      if: success()
+      run: |
+        echo "🎉 Deployment completed successfully!"
+        echo "Application URL: http://${{ steps.vm-details.outputs.public-ip }}"
+        echo "Version: ${{ needs.detect-changes.outputs.version }}"
+
+    - name: Notify deployment failure
+      if: failure()
+      run: |
+        echo "❌ Deployment failed!"
+        echo "Please check the logs and manually verify the deployment."
+
+  security-scan:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run security scan
+      run: |
+        echo "Running security scan..."
+        # Add security scanning tools here
+        # Example: npm audit, composer audit, etc.
+
+    - name: Container security scan
+      run: |
+        echo "Scanning Docker images for vulnerabilities..."
+        # Add container scanning tools here
+        # Example: trivy, docker scout, etc.
